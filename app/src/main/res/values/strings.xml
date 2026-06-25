@@ -254,6 +254,14 @@
     <string name="reducers">Reducers</string>
     <string name="info">Info</string>
     <string name="settings">Settings</string>
+    <string name="log_in">Log in</string>
+    <string name="sync_across_devices">Sync across my devices</string>
+    <string name="sync_across_devices_pitch">I keep your settings and time stats in step on every phone and browser, locked with a key only you hold.</string>
+    <string name="sync_finish_setup_pitch">You are signed in. One more step turns on sync and unlocks your data on this device.</string>
+    <string name="finish_sync_setup">Finish setup</string>
+    <string name="sync_is_on">Sync is on</string>
+    <string name="sync_is_on_pitch">Your settings and time stats stay in step on every device. Tap to manage sync or sign out.</string>
+    <string name="manage_sync">Manage sync</string>
     <string name="this_app_is_currently_under_focus">This app is currently under focus mode</string>
     <string name="blocked_keyword_word_was_found">Blocked keyword -word was found.</string>
     <string name="please_provide_draw_over_other_apps">Please provide \'Draw over other apps\' permission to make this service work properly. </string>
