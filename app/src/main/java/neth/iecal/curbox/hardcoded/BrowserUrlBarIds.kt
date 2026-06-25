@@ -16,6 +16,9 @@ val URL_BAR_ID_LIST = mapOf(
     "com.brave.browser" to BrowserUrlBarInfo(
         displayUrlBarId = "com.brave.browser:id/url_bar",
     ),
+    "com.vivaldi.browser" to BrowserUrlBarInfo(
+        displayUrlBarId = "com.vivaldi.browser:id/url_bar",
+    ),
 
 
     "org.mozilla.firefox" to BrowserUrlBarInfo(
