@@ -61,9 +61,13 @@ class AppBlocker() : BaseBlocker() {
     private var cooldownAppsList = ConcurrentHashMap<String, Long>()
 
     /**
-     * Stores general simple general list of block apps with their configs
+     * Stores blocked apps with their usage config and group package set.
      */
-    val blockedAppsList = ConcurrentHashMap<String, AppUsageConfig>()
+    data class UsageGroupConfig(
+        val config: AppUsageConfig,
+        val groupPackages: Set<String>
+    )
+    val blockedAppsList = ConcurrentHashMap<String, UsageGroupConfig>()
     val timeBlockedAppsList = ConcurrentHashMap<String, AppTimeConfig>()
     private val onOpenAppsList = ConcurrentHashMap<String, Boolean>()
     private val appBlockerWarningScrnConfgs = ConcurrentHashMap<String, AppBlockerWarningScreenConfig>()
@@ -129,10 +133,11 @@ class AppBlocker() : BaseBlocker() {
         }
 
         if (blockedAppsList.containsKey(packageName)) {
-            val config = blockedAppsList[packageName]!!
+            val usageGroupConfig = blockedAppsList[packageName]!!
             val currentUsage = runBlocking { usageStats.getForegroundStatsByRelativeDay(0) }
-                .firstOrNull { it.packageName == packageName }?.totalTime ?: 0L
-            val usageLimitMillis = getUsageLimitForToday(config) * 60_000L
+                .filter { usageGroupConfig.groupPackages.contains(it.packageName) }
+                .sumOf { it.totalTime }
+            val usageLimitMillis = getUsageLimitForToday(usageGroupConfig.config) * 60_000L
             val remainingUsage = usageLimitMillis - currentUsage
             
 
@@ -186,7 +191,7 @@ class AppBlocker() : BaseBlocker() {
             service.dataStoreManager.settings.collectLatest { settings ->
                 Log.d("AppBlocker", "Settings updated, groups count: ${settings.blockedAppGroups.size}")
 
-                val newBlockedAppsList = ConcurrentHashMap<String, AppUsageConfig>()
+                val newBlockedAppsList = ConcurrentHashMap<String, UsageGroupConfig>()
                 val newTimeBlockedAppsList = ConcurrentHashMap<String, AppTimeConfig>()
                 val newOnOpenAppsList = ConcurrentHashMap<String, Boolean>()
                 val newWarningConfigs = ConcurrentHashMap<String, AppBlockerWarningScreenConfig>()
@@ -199,9 +204,15 @@ class AppBlocker() : BaseBlocker() {
                         when (group.blockingType) {
                             AppBlockingType.Usage -> {
                                 val config = Gson().fromJson(group.setting, AppUsageConfig::class.java)
-                                group.selectedPackages.forEach {
-                                    val pkg = it.trim()
-                                    newBlockedAppsList[pkg] = config
+                                val groupPackages = group.selectedPackages
+                                    .map { it.trim() }
+                                    .filter { it.isNotEmpty() }
+                                    .toSet()
+                                groupPackages.forEach { pkg ->
+                                    newBlockedAppsList[pkg] = UsageGroupConfig(
+                                        config = config,
+                                        groupPackages = groupPackages
+                                    )
                                     newWarningConfigs[pkg] = group.warningScreenConfig
                                 }
                             }

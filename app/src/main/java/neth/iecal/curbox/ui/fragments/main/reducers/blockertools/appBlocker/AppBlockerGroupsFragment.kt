@@ -15,15 +15,22 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import com.google.gson.Gson
 import com.google.android.material.appbar.MaterialToolbar
 import com.google.android.material.floatingactionbutton.FloatingActionButton
 import com.google.android.material.switchmaterial.SwitchMaterial
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import neth.iecal.curbox.R
 import neth.iecal.curbox.data.models.AppBlockingType
 import neth.iecal.curbox.data.models.AppGroup
+import neth.iecal.curbox.data.models.AppUsageConfig
+import neth.iecal.curbox.data.db.AppDatabase
 import neth.iecal.curbox.ui.activity.FragmentActivity
+import neth.iecal.curbox.utils.TimeTools
+import java.util.Calendar
+import kotlin.math.max
 
 class AppBlockerGroupsFragment : Fragment() {
 
@@ -70,20 +77,56 @@ class AppBlockerGroupsFragment : Fragment() {
         viewLifecycleOwner.lifecycleScope.launch {
             viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
                 viewModel.groups.collectLatest { groups ->
+                    val remainingUsageByGroup = calculateRemainingUsageMinutesByGroup(groups)
                     if (groups.isEmpty()) {
                         tvEmptyState.visibility = View.VISIBLE
                         rvGroups.visibility = View.GONE
                     } else {
                         tvEmptyState.visibility = View.GONE
                         rvGroups.visibility = View.VISIBLE
-                        rvGroups.adapter = AppGroupAdapter(groups)
+                        rvGroups.adapter = AppGroupAdapter(groups, remainingUsageByGroup)
                     }
                 }
             }
         }
     }
 
-    inner class AppGroupAdapter(private val groupList: List<AppGroup>) :
+    private suspend fun calculateRemainingUsageMinutesByGroup(groups: List<AppGroup>): Map<String, Long> {
+        return kotlinx.coroutines.withContext(Dispatchers.IO) {
+            val usageGroups = groups.filter { it.blockingType == AppBlockingType.Usage }
+            if (usageGroups.isEmpty()) return@withContext emptyMap()
+
+            val today = TimeTools.getCurrentDate()
+            val usageByPackage = AppDatabase.getInstance(requireContext())
+                .appUsageDao()
+                .getForDate(today)
+                .associate { it.packageName to it.totalTime }
+            val dayOfWeek = Calendar.getInstance().get(Calendar.DAY_OF_WEEK) - 1
+
+            usageGroups.associate { group ->
+                val config = runCatching {
+                    Gson().fromJson(group.setting, AppUsageConfig::class.java)
+                }.getOrNull()
+                val limitMinutes = if (config == null) 0L else if (config.isDailyUniform) {
+                    config.uniformLimit
+                } else {
+                    config.dailyLimits[dayOfWeek]
+                }
+                val limitMillis = limitMinutes * 60_000L
+                val groupUsageMillis = group.selectedPackages.sumOf { pkg ->
+                    usageByPackage[pkg.trim()] ?: 0L
+                }
+                val remainingMillis = max(0L, limitMillis - groupUsageMillis)
+                val remainingMinutes = if (remainingMillis == 0L) 0L else (remainingMillis + 59_999L) / 60_000L
+                group.id to remainingMinutes
+            }
+        }
+    }
+
+    inner class AppGroupAdapter(
+        private val groupList: List<AppGroup>,
+        private val remainingUsageByGroup: Map<String, Long>
+    ) :
         RecyclerView.Adapter<AppGroupAdapter.ViewHolder>() {
 
         inner class ViewHolder(view: View) : RecyclerView.ViewHolder(view) {
@@ -103,7 +146,12 @@ class AppBlockerGroupsFragment : Fragment() {
             holder.tvName.text = group.name
             
             val typeText = if (group.blockingType == AppBlockingType.Timed) "Time Based" else "Usage Based"
-            holder.tvDetails.text = "${group.selectedPackages.size} Apps • $typeText"
+            val remainingText = if (group.blockingType == AppBlockingType.Usage) {
+                " • Remaining today: ${remainingUsageByGroup[group.id] ?: 0L} mins"
+            } else {
+                ""
+            }
+            holder.tvDetails.text = "${group.selectedPackages.size} Apps • $typeText$remainingText"
             
             holder.switchActive.setOnCheckedChangeListener(null)
             holder.switchActive.isChecked = group.isActive

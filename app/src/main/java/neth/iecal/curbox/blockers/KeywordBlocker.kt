@@ -234,10 +234,10 @@ class KeywordBlocker : BaseBlocker() {
             else removeCooldownFrom(matchedGroup.id)
         }
 
-        if (isBlocked(matchedGroup, entry.packageName)) {
+        if (isBlocked(matchedGroup)) {
             handleBlocking(matchedGroup)
         } else {
-            calculateAndSetNextRecheck(matchedGroup, entry.packageName)
+            calculateAndSetNextRecheck(matchedGroup)
         }
     }
 
@@ -256,9 +256,9 @@ class KeywordBlocker : BaseBlocker() {
         }, 300)
     }
 
-    private fun isBlocked(group: KeywordGroup, packageName: String): Boolean =
+    private fun isBlocked(group: KeywordGroup): Boolean =
         if (group.blockingType == AppBlockingType.Timed) isTimedBlockActive(group)
-        else isUsageLimitExceeded(group, packageName)
+        else isUsageLimitExceeded(group)
 
     // Intervals describe the ALLOWED time. Keywords are blocked whenever the
     // current time falls outside every allowed interval (matching the app blocker).
@@ -282,7 +282,7 @@ class KeywordBlocker : BaseBlocker() {
         return true
     }
 
-    private fun isUsageLimitExceeded(group: KeywordGroup, packageName: String): Boolean {
+    private fun isUsageLimitExceeded(group: KeywordGroup): Boolean {
         val config = Gson().fromJson(group.setting, AppUsageConfig::class.java) ?: return false
         val limit = (if (config.isDailyUniform) config.uniformLimit else {
             config.dailyLimits[Calendar.getInstance().get(Calendar.DAY_OF_WEEK) - 1]
@@ -290,17 +290,11 @@ class KeywordBlocker : BaseBlocker() {
 
         if (limit <= 0) return true
 
-        val date = TimeTools.getCurrentDate()
-        val totalUsage = runBlocking(Dispatchers.IO) {
-            AppDatabase.getInstance(service).websiteStatsDao()
-                .getStatsForPackage(date, packageName)
-                .filter { matchesGroup(group, it.urlIdentifier) }
-                .sumOf { it.totalTime }
-        }
+        val totalUsage = getUsageForGroupToday(group)
         return totalUsage >= limit
     }
 
-    private fun calculateAndSetNextRecheck(group: KeywordGroup, packageName: String) {
+    private fun calculateAndSetNextRecheck(group: KeywordGroup) {
         val now = System.currentTimeMillis()
         var nextRecheck = 0L
 
@@ -311,13 +305,7 @@ class KeywordBlocker : BaseBlocker() {
                     config.dailyLimits[Calendar.getInstance().get(Calendar.DAY_OF_WEEK) - 1]
                 }) * 60_000L
                 if (limit > 0) {
-                    val date = TimeTools.getCurrentDate()
-                    val totalUsage = runBlocking(Dispatchers.IO) {
-                        AppDatabase.getInstance(service).websiteStatsDao()
-                            .getStatsForPackage(date, packageName)
-                            .filter { matchesGroup(group, it.urlIdentifier) }
-                            .sumOf { it.totalTime }
-                    }
+                    val totalUsage = getUsageForGroupToday(group)
                     val remaining = limit - totalUsage
                     if (remaining > 0) nextRecheck = now + remaining + 1000
                 }
@@ -365,6 +353,16 @@ class KeywordBlocker : BaseBlocker() {
             CoroutineScope(Dispatchers.IO).launch {
                 service.dataStoreManager.updateNextWebsiteRecheckTime(nextRecheck)
             }
+        }
+    }
+
+    private fun getUsageForGroupToday(group: KeywordGroup): Long {
+        val date = TimeTools.getCurrentDate()
+        return runBlocking(Dispatchers.IO) {
+            AppDatabase.getInstance(service).websiteStatsDao()
+                .getStatsForDate(date)
+                .filter { matchesGroup(group, it.urlIdentifier) }
+                .sumOf { it.totalTime }
         }
     }
 
