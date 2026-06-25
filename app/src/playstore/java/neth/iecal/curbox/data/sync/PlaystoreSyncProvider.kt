@@ -48,6 +48,9 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
     private val NS_FOCUS = "focus_state"
     private val NS_FOCUS_GROUPS = "focus_groups"
 
+    // Websites visited for less than this in a day aren't worth syncing.
+    private val MIN_WEBSITE_SYNC_MS = 60_000L
+
     private var session: SupabaseRest.Session? = null
     private var dek: ByteArray? = null
     private var vaultExists: Boolean = false
@@ -428,9 +431,12 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
         val d = dek ?: return
         val domains = JsonObject()
         for ((domain, group) in rows.groupBy { it.domain }) {
+            // Skip brief visits. Anything under a minute is noise we don't sync.
+            val total = group.sumOf { it.totalTime }
+            if (total < MIN_WEBSITE_SYNC_MS) continue
             val paths = JsonObject().apply { group.forEach { addProperty(it.urlIdentifier, it.totalTime) } }
             domains.add(domain, JsonObject().apply {
-                addProperty("ms", group.sumOf { it.totalTime })
+                addProperty("ms", total)
                 add("paths", paths)
             })
         }
