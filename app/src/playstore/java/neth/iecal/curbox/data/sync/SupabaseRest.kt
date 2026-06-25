@@ -176,14 +176,28 @@ class SupabaseRest(
         authedPost(session, "vault", obj.toString(), "return=minimal")
     }
 
-    fun upsertDevice(session: Session, id: String, platform: String, label: String) {
+    fun upsertDevice(session: Session, id: String, platform: String, label: String, fcmToken: String? = null) {
         val obj = JsonObject().apply {
             addProperty("id", id)
             addProperty("user_id", session.userId)
             addProperty("platform", platform)
             addProperty("label", label)
+            if (fcmToken != null) addProperty("fcm_token", fcmToken)
         }
         authedPost(session, "devices?on_conflict=id", "[$obj]", "resolution=merge-duplicates,return=minimal")
+    }
+
+    /** Clears this device's push token so a signed out device stops receiving pings. */
+    fun clearDeviceToken(session: Session, id: String) {
+        val req = Request.Builder()
+            .url("$baseUrl/rest/v1/devices?id=eq.$id")
+            .header("apikey", anonKey)
+            .header("Authorization", "Bearer ${session.accessToken}")
+            .header("Content-Type", "application/json")
+            .header("Prefer", "return=minimal")
+            .patch(JsonObject().apply { add("fcm_token", com.google.gson.JsonNull.INSTANCE) }.toString().toRequestBody(jsonType))
+            .build()
+        client.newCall(req).execute().use { }
     }
 
     fun pull(session: Session, cursor: String): List<SyncRow> {

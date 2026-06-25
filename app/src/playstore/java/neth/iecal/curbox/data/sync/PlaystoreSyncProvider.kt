@@ -21,6 +21,7 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import neth.iecal.curbox.data.db.AppDatabase
 import neth.iecal.curbox.data.db.AppUsageEntity
@@ -47,6 +48,7 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
     private val db by lazy { AppDatabase.getInstance(context) }
     private val dataStore by lazy { DataStoreManager.getSettingsDataStore(context, gson) }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val startMutex = kotlinx.coroutines.sync.Mutex()
 
     private val NS_ANDROID_CONFIG = "android_config"
     private val NS_USAGE_WEB = "usage_web"
@@ -77,24 +79,43 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
     override val isAvailable = true
 
     override fun start() {
+        scope.launch { ensureStarted() }
+    }
+
+    // Restores the session from the stored refresh token exactly once. Guarded by
+    // a mutex so the two entry points (Application start and an FCM wake) can race
+    // safely: whichever loses the race waits and then sees an established session.
+    private suspend fun ensureStarted() = startMutex.withLock {
+        if (session != null) return
+        runCatching { SyncWorker.schedule(context) }
+        val refresh = keys.refreshToken ?: return
+        try {
+            session = rest.refresh(refresh).also { persistSession(it) }
+            keys.dekB64?.let { dek = CryptoBox.fromBase64Url(it) }
+            onSignedIn()
+        } catch (e: Exception) {
+            // A refresh token the server rejected will never recover, so wipe
+            // the local session and drop back to a clean signed out state. A
+            // plain network outage (e.g. "unable to resolve host") is kept so
+            // the next start can retry once we are back online.
+            if (isRejectedToken(e)) {
+                keys.clear()
+                session = null
+                dek = null
+            }
+            publishStatus(error = e.message)
+        }
+    }
+
+    // Called when an FCM ping wakes the (possibly cold) process: make sure we are
+    // signed in, then pull right away.
+    fun wake() {
         scope.launch {
-            runCatching { SyncWorker.schedule(context) }
-            val refresh = keys.refreshToken ?: return@launch
-            try {
-                session = rest.refresh(refresh).also { persistSession(it) }
-                keys.dekB64?.let { dek = CryptoBox.fromBase64Url(it) }
-                onSignedIn()
-            } catch (e: Exception) {
-                // A refresh token the server rejected will never recover, so wipe
-                // the local session and drop back to a clean signed out state. A
-                // plain network outage (e.g. "unable to resolve host") is kept so
-                // the next start can retry once we are back online.
-                if (isRejectedToken(e)) {
-                    keys.clear()
-                    session = null
-                    dek = null
-                }
-                publishStatus(error = e.message)
+            ensureStarted()
+            if (session != null && dek != null) {
+                ensureFreshToken()
+                runCatching { pullSinceCursor() }
+                runCatching { pushUsage() }
             }
         }
     }
@@ -160,6 +181,8 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
 
     override suspend fun signOut() = withContext(Dispatchers.IO) {
         stopRealtime()
+        // Stop this device from receiving pings for an account it is leaving.
+        runCatching { session?.let { rest.clearDeviceToken(it, keys.deviceId) } }
         keys.clear()
         session = null
         dek = null
@@ -267,9 +290,10 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
     private suspend fun onSignedIn() {
         val s = session ?: return
         try {
-            rest.upsertDevice(s, keys.deviceId, "android", "android")
+            rest.upsertDevice(s, keys.deviceId, "android", "android", keys.fcmToken)
         } catch (_: Exception) {
         }
+        registerFcmToken()
         // Find out whether a passphrase already exists so the screen can ask to
         // unlock or pair instead of offering to make a new one. Holding the key
         // already implies a vault exists.
@@ -277,7 +301,10 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
         publishStatus()
         if (dek != null) {
             startObservers()
-            startRealtime()
+            // Once FCM is verified end to end, SYNC_USE_FCM drops the always-open
+            // websocket: the push wakes us instead, which is the memory win. Until
+            // then realtime stays on so there is no regression.
+            if (!neth.iecal.curbox.BuildConfig.SYNC_USE_FCM) startRealtime()
             startSafetyPoll()
             pullSinceCursor()
             pushConfig()
@@ -311,6 +338,25 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
         realtimeConnected = false
     }
 
+    // FCM push token registration. The token lets the server send a content-less
+    // wake ping to this device. Called by the messaging service on rotation.
+    fun onFcmToken(token: String) {
+        keys.fcmToken = token
+        scope.launch {
+            val s = session ?: return@launch
+            runCatching { rest.upsertDevice(s, keys.deviceId, "android", "android", token) }
+        }
+    }
+
+    private fun registerFcmToken() {
+        scope.launch {
+            val token = runCatching { FcmPush.token(context) }.getOrNull() ?: return@launch
+            keys.fcmToken = token
+            val s = session ?: return@launch
+            runCatching { rest.upsertDevice(s, keys.deviceId, "android", "android", token) }
+        }
+    }
+
     // A short backstop poll so sync stays quick even if the realtime socket is
     // unavailable (some networks block WebSockets). Far better than the 15 minute
     // worker for catching changes while the app is alive. Also keeps the access
@@ -320,9 +366,16 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
         pollStarted = true
         scope.launch {
             while (true) {
-                // When realtime is delivering, this is just a slow backstop; when
-                // it is down (e.g. WebSockets blocked) it tightens up to stay quick.
-                delay(if (realtimeConnected) 60_000 else 10_000)
+                // In FCM mode the push is the instant channel, so this is only a
+                // rare safety net. Otherwise: a slow backstop while realtime is
+                // delivering, tightening up when realtime is down (WebSockets
+                // blocked) to stay quick.
+                val interval = when {
+                    neth.iecal.curbox.BuildConfig.SYNC_USE_FCM -> 300_000L
+                    realtimeConnected -> 60_000L
+                    else -> 10_000L
+                }
+                delay(interval)
                 if (dek == null || session == null) continue
                 ensureFreshToken()
                 runCatching { pullSinceCursor() }

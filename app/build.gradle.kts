@@ -37,6 +37,12 @@ android {
             dimension = "version"
             versionNameSuffix = "-playstore"
             buildConfigField("Boolean", "FDROID_VARIANT", "false")
+            // Staging switch for the FCM push migration. While false, the realtime
+            // websocket + poll stay on (no regression) and FCM only adds background
+            // delivery. Flip to true once FCM is verified end to end: realtime is
+            // then dropped and the poll slows right down, which is where the memory
+            // and battery win lands.
+            buildConfigField("Boolean", "SYNC_USE_FCM", "true")
         }
     }
 
@@ -122,6 +128,13 @@ dependencies {
     "playstoreImplementation"(libs.okhttp)
     "playstoreImplementation"(libs.androidx.security.crypto)
     "playstoreImplementation"(libs.androidx.work.runtime.ktx)
+
+    // FCM push, Play Store flavor ONLY, so the phone can sync instantly in the
+    // background without holding a websocket open. F-Droid never pulls in Firebase
+    // or Google Play Services. Initialised manually from FcmConfig, so the
+    // google-services Gradle plugin and google-services.json are NOT required.
+    "playstoreImplementation"(platform("com.google.firebase:firebase-bom:33.5.1"))
+    "playstoreImplementation"("com.google.firebase:firebase-messaging")
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

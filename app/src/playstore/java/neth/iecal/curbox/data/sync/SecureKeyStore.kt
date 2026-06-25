@@ -40,12 +40,16 @@ class SecureKeyStore(context: Context) {
         get() = prefs.getString("cursor", "1970-01-01T00:00:00Z")!!
         set(v) = prefs.edit().putString("cursor", v).apply()
 
+    var fcmToken: String?
+        get() = prefs.getString("fcm_token", null)
+        set(v) = prefs.edit().putString("fcm_token", v).apply()
+
     val deviceId: String
         get() = prefs.getString("device_id", null) ?: UUID.randomUUID().toString().also {
             prefs.edit().putString("device_id", it).apply()
         }
 
     fun clear() {
-        prefs.edit().remove("dek").remove("access_token").remove("refresh_token").remove("cursor").apply()
+        prefs.edit().remove("dek").remove("access_token").remove("refresh_token").remove("cursor").remove("fcm_token").apply()
     }
 }
