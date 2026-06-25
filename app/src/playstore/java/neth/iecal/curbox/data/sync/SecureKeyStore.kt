@@ -5,11 +5,6 @@ import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import java.util.UUID
 
-/**
- * Device local sync secrets, held in Keystore backed encrypted preferences. The
- * unwrapped data key never leaves this device and is never written to anything
- * that syncs.
- */
 class SecureKeyStore(context: Context) {
     private val prefs = run {
         val masterKey = MasterKey.Builder(context)

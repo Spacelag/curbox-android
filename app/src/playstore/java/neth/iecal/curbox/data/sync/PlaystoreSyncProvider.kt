@@ -31,18 +31,10 @@ import neth.iecal.curbox.data.models.Settings
 import neth.iecal.curbox.utils.DataStoreManager
 import org.json.JSONObject
 
-/**
- * The real sync engine, present only in the Play Store flavor. Config syncs both
- * ways across a user's phones (last write wins). Website and app usage are
- * pushed per device so other devices and the browser extension can show unified
- * totals without double counting.
- */
 @OptIn(FlowPreview::class)
 class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
 
     private val gson = Gson()
-    // Lazy so nothing heavy (Keystore prefs, Room, DataStore) runs on the main
-    // thread during Application.onCreate. These first touch inside start().
     private val rest by lazy { SupabaseRest() }
     private val keys by lazy { SecureKeyStore(context) }
     private val db by lazy { AppDatabase.getInstance(context) }
@@ -58,9 +50,6 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
 
     private var session: SupabaseRest.Session? = null
     private var dek: ByteArray? = null
-    // Whether a passphrase (vault) already exists on the server for this account.
-    // Distinct from being unlocked: a second device has a vault but no local key
-    // yet, so the UI must offer to UNLOCK or pair, not create a new passphrase.
     private var vaultExists: Boolean = false
     private var realtime: RealtimeClient? = null
     @Volatile private var realtimeConnected = false
@@ -68,8 +57,6 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
     private var lastConfigJson: String? = null
     private var lastFocusJson: String? = null
     private val injectedGroupIds = HashSet<String>()
-    // Last synced canonical JSON per focus group id, so we push only real changes
-    // and never bounce an applied remote group straight back up.
     private val focusGroupShadow = HashMap<String, String>()
     private val pushedHashes = HashMap<String, Int>()
     private var observersStarted = false
@@ -82,9 +69,6 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
         scope.launch { ensureStarted() }
     }
 
-    // Restores the session from the stored refresh token exactly once. Guarded by
-    // a mutex so the two entry points (Application start and an FCM wake) can race
-    // safely: whichever loses the race waits and then sees an established session.
     private suspend fun ensureStarted() = startMutex.withLock {
         if (session != null) return
         runCatching { SyncWorker.schedule(context) }
@@ -94,10 +78,6 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
             keys.dekB64?.let { dek = CryptoBox.fromBase64Url(it) }
             onSignedIn()
         } catch (e: Exception) {
-            // A refresh token the server rejected will never recover, so wipe
-            // the local session and drop back to a clean signed out state. A
-            // plain network outage (e.g. "unable to resolve host") is kept so
-            // the next start can retry once we are back online.
             if (isRejectedToken(e)) {
                 keys.clear()
                 session = null
@@ -107,8 +87,6 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
         }
     }
 
-    // Called when an FCM ping wakes the (possibly cold) process: make sure we are
-    // signed in, then pull right away.
     fun wake() {
         scope.launch {
             ensureStarted()
@@ -119,8 +97,6 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
             }
         }
     }
-
-    // Auth -----------------------------------------------------------------
 
     private var pendingEmail: String? = null
 
@@ -181,7 +157,6 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
 
     override suspend fun signOut() = withContext(Dispatchers.IO) {
         stopRealtime()
-        // Stop this device from receiving pings for an account it is leaving.
         runCatching { session?.let { rest.clearDeviceToken(it, keys.deviceId) } }
         keys.clear()
         session = null
@@ -193,13 +168,9 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
         pushedHashes.clear()
         injectedGroupIds.clear()
         focusGroupShadow.clear()
-        // Forget other devices' usage so a fresh sign in does not show stale
-        // numbers from the previous account.
         runCatching { RemoteUsageStore(context).clear() }
         publishStatus()
     }
-
-    // Vault and unlock -----------------------------------------------------
 
     override suspend fun setPassphrase(passphrase: String) = withContext(Dispatchers.IO) {
         val s = requireSession()
@@ -263,12 +234,8 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
         pushUsage()
     }
 
-    // Internals ------------------------------------------------------------
-
     private fun requireSession(): SupabaseRest.Session = session ?: throw IllegalStateException("sign in first")
 
-    // True when the server explicitly rejected our token (vs a transient network
-    // error), meaning retrying with the same token is pointless.
     private fun isRejectedToken(e: Exception): Boolean {
         val m = e.message?.lowercase() ?: return false
         return "invalid" in m || "expired" in m || "revoked" in m ||
@@ -294,16 +261,10 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
         } catch (_: Exception) {
         }
         registerFcmToken()
-        // Find out whether a passphrase already exists so the screen can ask to
-        // unlock or pair instead of offering to make a new one. Holding the key
-        // already implies a vault exists.
         vaultExists = if (dek != null) true else runCatching { rest.getVault(s) != null }.getOrElse { vaultExists }
         publishStatus()
         if (dek != null) {
             startObservers()
-            // Once FCM is verified end to end, SYNC_USE_FCM drops the always-open
-            // websocket: the push wakes us instead, which is the memory win. Until
-            // then realtime stays on so there is no regression.
             if (!neth.iecal.curbox.BuildConfig.SYNC_USE_FCM) startRealtime()
             startSafetyPoll()
             pullSinceCursor()
@@ -315,8 +276,6 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
         publishStatus()
     }
 
-    // Realtime push: the moment another device writes a change, we hear about it
-    // and pull, so a focus start elsewhere lands here in about a second.
     private fun startRealtime() {
         val s = session ?: return
         val existing = realtime
@@ -338,8 +297,6 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
         realtimeConnected = false
     }
 
-    // FCM push token registration. The token lets the server send a content-less
-    // wake ping to this device. Called by the messaging service on rotation.
     fun onFcmToken(token: String) {
         keys.fcmToken = token
         scope.launch {
@@ -357,19 +314,11 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
         }
     }
 
-    // A short backstop poll so sync stays quick even if the realtime socket is
-    // unavailable (some networks block WebSockets). Far better than the 15 minute
-    // worker for catching changes while the app is alive. Also keeps the access
-    // token fresh so long lived sessions do not silently stop syncing.
     private fun startSafetyPoll() {
         if (pollStarted) return
         pollStarted = true
         scope.launch {
             while (true) {
-                // In FCM mode the push is the instant channel, so this is only a
-                // rare safety net. Otherwise: a slow backstop while realtime is
-                // delivering, tightening up when realtime is down (WebSockets
-                // blocked) to stay quick.
                 val interval = when {
                     neth.iecal.curbox.BuildConfig.SYNC_USE_FCM -> 300_000L
                     realtimeConnected -> 60_000L
@@ -410,8 +359,6 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
                 runCatching { pushFocusGroups(settings) }
             }
         }
-        // Focus start and stop push immediately, with no debounce, so the other
-        // device reacts right away instead of waiting out the config window.
         scope.launch {
             dataStore.data
                 .distinctUntilChangedBy { it.activeManualFocusGroupId }
@@ -419,10 +366,6 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
                     if (dek != null) runCatching { pushFocusFrom(settings) }
                 }
         }
-        // Usage observers follow the current day. Without re-binding on a date
-        // change, a phone left running past midnight would keep pushing
-        // yesterday's numbers and never start on the new day until the next
-        // worker run.
         scope.launch {
             currentDayFlow().flatMapLatest { native ->
                 db.websiteStatsDao().observeStatsForDate(native).map { native to it }
@@ -439,8 +382,6 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
         }
     }
 
-    // Emits the app's native date string now, then again whenever the calendar
-    // day flips, so day bound database observers can re-bind to the new day.
     private fun currentDayFlow(): Flow<String> = flow {
         var last: String? = null
         while (true) {
@@ -453,18 +394,12 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
         }
     }
 
-    // Both the active focus and the focus group definitions travel through their
-    // own cross platform namespaces, not the per platform config, so they are
-    // stripped from the config payload. Without this, an android-to-android pair
-    // would sync groups twice and the two paths would fight.
     private fun normalize(s: Settings): Settings =
         s.copy(
             activeManualFocusGroupId = Pair(null, 0L),
             nextWebsiteRecheckTime = 0L,
             manualFocusGroups = emptyList(),
         )
-
-    // Push -----------------------------------------------------------------
 
     private suspend fun pushConfig() {
         val settings = dataStore.data.first()
@@ -488,8 +423,6 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
         runCatching { pushAppRows(iso, db.appUsageDao().getForDate(native)) }
     }
 
-    // One record carries a whole day's web usage for this device, keyed by
-    // deviceId:date, so a busy day is a single row instead of one per domain.
     private fun pushWebRows(date: String, rows: List<WebsiteStatsEntity>) {
         val s = session ?: return
         val d = dek ?: return
@@ -536,10 +469,6 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
         pushedHashes[hashKey] = payload.hashCode()
     }
 
-    // Focus mode (cross platform) -----------------------------------------
-
-    // Canonical JSON for the active focus. Arrays are sorted so push and apply
-    // produce identical strings, which is how we suppress the echo loop.
     private fun buildFocusJson(
         active: Boolean,
         groupId: String,
@@ -601,7 +530,6 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
         val name = p.optString("name", "Focus")
         val exitable = p.optBoolean("exitable", true)
 
-        // Remember this exact state so the settings observer does not push it back.
         lastFocusJson = buildFocusJson(active, groupId, name, endsAt, p.optLong("startedAt"), domains, packages, mode, exitable)
 
         if (active && endsAt > System.currentTimeMillis()) {
@@ -633,12 +561,6 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
         return (0 until arr.length()).map { arr.getString(it) }
     }
 
-    // Focus group definitions (cross platform) -----------------------------
-
-    // Canonical JSON for one focus group. Key order and sorted arrays match the
-    // extension's canonicalFocusGroupJson so the same group reads as unchanged on
-    // both sides. Apps and the DND flag are Android only but ride along so the
-    // browser can hand them back untouched.
     private fun canonicalFocusGroupJson(g: neth.iecal.curbox.data.models.ManualFocusGroup): String {
         val o = JsonObject()
         o.addProperty("id", g.groupId)
@@ -656,8 +578,6 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
         val d = dek ?: return
         val present = HashSet<String>()
         for (g in settings.manualFocusGroups) {
-            // A group injected only to satisfy a remote active focus is transient;
-            // the device that actually owns it pushes the real definition.
             if (g.groupId in injectedGroupIds) continue
             present.add(g.groupId)
             val json = canonicalFocusGroupJson(g)
@@ -667,7 +587,6 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
             rest.upsertRecord(s, NS_FOCUS_GROUPS, g.groupId, keys.deviceId, CryptoBox.toBase64Url(blob), System.currentTimeMillis())
             focusGroupShadow[g.groupId] = json
         }
-        // Tombstone groups we synced before but the user has since removed.
         for (id in focusGroupShadow.keys.toList()) {
             if (id in present) continue
             val aad = CryptoBox.recordAad(s.userId, NS_FOCUS_GROUPS, id)
@@ -709,32 +628,21 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
             for (g in local.manualFocusGroups) byId[g.groupId] = g
             for (id in removed) byId.remove(id)
             for ((id, g) in upserts) byId[id] = g
-            // These are now real shared groups, not transient injections.
             injectedGroupIds.removeAll(upserts.keys)
             local.copy(manualFocusGroups = byId.values.toList())
         }
     }
-
-    // Pull -----------------------------------------------------------------
 
     private suspend fun pullSinceCursor() {
         val s = session ?: return
         val d = dek ?: return
         try {
             val rows = rest.pull(s, keys.cursor)
-            // Idle poll: nothing new. Skip the work and, importantly, do not
-            // republish status, so the UI does not re-render every poll tick.
             if (rows.isEmpty()) return
             var configRow: SupabaseRest.SyncRow? = null
             var focusRow: SupabaseRest.SyncRow? = null
             val focusGroupRows = ArrayList<SupabaseRest.SyncRow>()
-            // Loaded lazily: most pulls carry no usage rows, so we avoid reading
-            // and parsing the whole remote usage file on every tick.
             var remoteUsage: RemoteUsageStore? = null
-            // Track the high water mark separately and only commit it once the
-            // whole batch is applied. A single undecryptable row is skipped rather
-            // than poisoning the batch, but the cursor never jumps past work we
-            // have not finished, so a mid pull failure simply retries next time.
             var maxCursor = keys.cursor
             for (row in rows) {
                 runCatching {
@@ -770,8 +678,6 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
         if (norm == lastConfigJson) return
         lastConfigJson = norm
         dataStore.updateData { local ->
-            // The config payload no longer carries focus groups or the active
-            // focus, so keep the local copies of those.
             remote.copy(
                 activeManualFocusGroupId = local.activeManualFocusGroupId,
                 nextWebsiteRecheckTime = local.nextWebsiteRecheckTime,
@@ -787,8 +693,6 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
         store.put(ns, row.recordKey, json)
     }
 
-    // Status ---------------------------------------------------------------
-
     private fun publishStatus(lastSync: Long? = _status.value.lastSync, error: String? = null) {
         val s = session
         _status.value = SyncStatus(
@@ -803,15 +707,9 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
         )
     }
 
-    // Room stores dates in the app's native "dd MMMM yyyy" format; the sync wire
-    // format is ISO yyyy-MM-dd so it lines up with the extension cross platform.
     private fun todayNative(): String = neth.iecal.curbox.utils.TimeTools.getCurrentDate()
     private fun todayIso(): String = java.time.LocalDate.now().toString()
 
-    // Converts the app's native "dd MMMM yyyy" date back to the ISO date used on
-    // the wire, so a record observed for a given day always carries that day's
-    // ISO key even right after a midnight rollover. Falls back to today if a
-    // non default locale makes the month name unparseable.
     private fun isoFor(native: String): String = try {
         java.time.LocalDate.parse(
             native,

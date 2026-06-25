@@ -9,16 +9,6 @@ import okhttp3.WebSocketListener
 import org.json.JSONArray
 import org.json.JSONObject
 
-/**
- * A tiny Supabase Realtime (Phoenix) client over a WebSocket. It listens for any
- * change to this user's `sync_records` and fires [onChange] so the provider can
- * pull immediately. This is what lets a focus start on another device show up
- * here in about a second instead of waiting on the periodic worker.
- *
- * It is deliberately forgiving: any hiccup just reconnects, and the provider also
- * keeps a short poll as a backstop, so a realtime outage only slows sync down a
- * little, it never breaks it. Nothing here is allowed to take the app down.
- */
 class RealtimeClient(
     private val userId: String,
     @Volatile private var accessToken: String,
@@ -46,7 +36,6 @@ class RealtimeClient(
         ws = null
     }
 
-    /** Swap in a refreshed JWT so the subscription keeps passing row level security. */
     fun updateToken(token: String) {
         accessToken = token
         val w = ws ?: return
@@ -111,7 +100,6 @@ class RealtimeClient(
         )
     }
 
-    // Phoenix closes idle channels, so keep ours alive with an app level heartbeat.
     private fun startHeartbeat(webSocket: WebSocket) {
         Thread {
             try {
@@ -135,9 +123,6 @@ class RealtimeClient(
 
     private fun reconnectLater() {
         if (!running.get()) return
-        // onFailure and onClosed can both fire for the same socket; this guard
-        // makes sure only one reconnect (and one new socket + heartbeat) is ever
-        // scheduled at a time, so they cannot pile up on a flaky network.
         if (!reconnecting.compareAndSet(false, true)) return
         ws = null
         Thread {

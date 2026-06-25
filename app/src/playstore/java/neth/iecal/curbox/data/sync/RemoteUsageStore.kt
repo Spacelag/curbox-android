@@ -4,24 +4,12 @@ import android.content.Context
 import java.io.File
 import org.json.JSONObject
 
-/**
- * Holds other devices' usage that we pulled down, kept separate from local Room
- * so this device's own counters stay authoritative. The UI can union these in to
- * show unified totals across every device. One JSON file, one record per other
- * device per day, never touching the local usage database.
- *
- * The file is v2: each record is now a whole day for a device (record_key
- * deviceId:date) instead of one row per domain. The old v1 file is deleted on
- * first use so the two formats can never be summed together and double count.
- */
 class RemoteUsageStore(context: Context) {
     private val file = File(context.filesDir, "sync_remote_usage_v2.json")
     private val records: HashMap<String, String> = load(context)
     private var dirty = false
 
     private fun load(context: Context): HashMap<String, String> {
-        // One time migration: drop the per domain v1 cache so old and new records
-        // are never mixed.
         runCatching {
             val legacy = File(context.filesDir, "sync_remote_usage.json")
             if (legacy.exists()) legacy.delete()
@@ -37,8 +25,6 @@ class RemoteUsageStore(context: Context) {
         return loaded
     }
 
-    // Keep only the recent days the UI can actually show, so the file cannot grow
-    // without bound as the days go by.
     private fun pruneOld(map: HashMap<String, String>) {
         val cutoff = java.time.LocalDate.now().minusDays(14).toString()
         val stale = map.entries.filter { (_, json) ->
@@ -63,15 +49,12 @@ class RemoteUsageStore(context: Context) {
         dirty = false
     }
 
-    /** Drops every other device's cached usage. Used on sign out so a signed out
-     *  device never keeps showing data that belonged to a different account. */
     fun clear() {
         records.clear()
         dirty = false
         runCatching { if (file.exists()) file.delete() }
     }
 
-    /** Summed app milliseconds by package for a date, across all other Android devices. */
     fun appTotals(date: String): Map<String, Long> {
         val out = HashMap<String, Long>()
         for ((key, json) in records) {
@@ -89,7 +72,6 @@ class RemoteUsageStore(context: Context) {
         return out
     }
 
-    /** Summed website milliseconds by domain for a date, across all other devices. */
     fun websiteTotals(date: String): Map<String, Long> {
         val out = HashMap<String, Long>()
         for ((key, json) in records) {

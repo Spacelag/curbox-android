@@ -8,13 +8,6 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 
-/**
- * A thin REST client for Supabase. We talk to GoTrue (auth) and PostgREST
- * (data) directly over OkHttp instead of pulling in the supabase-kt SDK, which
- * would force a project wide Kotlin 2.0 upgrade. Keeping the surface small also
- * keeps the F-Droid exclusion trivial since all of this lives in the playstore
- * flavor.
- */
 class SupabaseRest(
     private val baseUrl: String = "https://pdixkzhncuuxuxwhdwdh.supabase.co",
     private val anonKey: String = ANON_KEY,
@@ -28,7 +21,7 @@ class SupabaseRest(
         val refreshToken: String,
         val userId: String,
         val email: String?,
-        val expiresAt: Long, // epoch ms
+        val expiresAt: Long,
     )
 
     data class VaultRow(val saltB64: String, val paramsJson: String, val wrappedB64: String)
@@ -92,7 +85,6 @@ class SupabaseRest(
             ?: throw IOException("could not refresh session")
     }
 
-    /** Confirms an account or a recovery with a 6 digit code. type = "signup" | "recovery" | "email". */
     fun verifyOtp(email: String, token: String, type: String): Session {
         val body = JsonObject().apply {
             addProperty("email", email)
@@ -123,8 +115,6 @@ class SupabaseRest(
             if (!resp.isSuccessful) throw IOException("could not update password (${resp.code})")
         }
     }
-
-    // PostgREST ------------------------------------------------------------
 
     private fun authedGet(session: Session, path: String): String {
         val req = Request.Builder()
@@ -187,7 +177,6 @@ class SupabaseRest(
         authedPost(session, "devices?on_conflict=id", "[$obj]", "resolution=merge-duplicates,return=minimal")
     }
 
-    /** Clears this device's push token so a signed out device stops receiving pings. */
     fun clearDeviceToken(session: Session, id: String) {
         val req = Request.Builder()
             .url("$baseUrl/rest/v1/devices?id=eq.$id")
@@ -201,10 +190,6 @@ class SupabaseRest(
     }
 
     fun pull(session: Session, cursor: String): List<SyncRow> {
-        // The cursor is a server timestamp like 2026-06-24T12:00:00.123456+00:00.
-        // It MUST be percent encoded: an un encoded "+" in a URL query is read as a
-        // space, which Postgres then rejects as an invalid timestamp, breaking
-        // every pull after the first one.
         val encodedCursor = java.net.URLEncoder.encode(cursor, "UTF-8")
         val path = "sync_records?user_id=eq.${session.userId}&updated_at=gt.$encodedCursor" +
             "&order=updated_at.asc&select=namespace,record_key,device_id,ciphertext,version,deleted,updated_at"

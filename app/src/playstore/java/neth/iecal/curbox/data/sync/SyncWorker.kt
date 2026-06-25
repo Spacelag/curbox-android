@@ -11,11 +11,6 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import java.util.concurrent.TimeUnit
 
-/**
- * The durable backstop for sync. Realtime is not used on Android, so this
- * periodic pull and push keeps every device current even after the app was
- * killed.
- */
 class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result {
         SyncGateway.init(applicationContext)
@@ -34,9 +29,6 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
         private const val NAME = "curbox_sync"
 
         fun schedule(context: Context) {
-            // This app does not ship the androidx.startup initializer, so make
-            // sure WorkManager is up before we touch it. Call this off the main
-            // thread, never from Application.onCreate.
             if (!WorkManager.isInitialized()) {
                 WorkManager.initialize(context.applicationContext, Configuration.Builder().build())
             }

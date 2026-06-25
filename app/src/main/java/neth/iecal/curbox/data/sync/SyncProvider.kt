@@ -51,7 +51,7 @@ data class SyncStatus(
     val pendingEmail: String? = null,
 )
 
-/** Used by the F-Droid flavor. Sync is simply not a thing there. */
+/** Used by the F-Droid flavor. */
 object NoopSyncProvider : SyncProvider {
     override val isAvailable = false
     override val status = MutableStateFlow(SyncStatus())
