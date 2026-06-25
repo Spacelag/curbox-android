@@ -61,7 +61,7 @@ class AppBlocker() : BaseBlocker() {
     private var cooldownAppsList = ConcurrentHashMap<String, Long>()
 
     /**
-     * Stores blocked apps with their usage config and group package set.
+     * Maps each package in a usage group to that group's config and full package set.
      */
     data class UsageGroupConfig(
         val config: AppUsageConfig,
