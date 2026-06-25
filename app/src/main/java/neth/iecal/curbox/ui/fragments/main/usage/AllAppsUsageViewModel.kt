@@ -197,8 +197,17 @@ class AllAppsUsageViewModel(application: Application) : AndroidViewModel(applica
 
     private suspend fun loadDayStats(date: LocalDate) {
         val stats = getFilteredStatsForDay(date)
-        preloadAppMetadata(stats.map { it.packageName })
-        val total = stats.sumOf { it.totalTime }
+
+        // Fold in app usage synced from the user's other Android devices, summed
+        // per app so each row shows combined time across every device. Empty on
+        // F-Droid and when nothing has synced.
+        val remoteApps = runCatching {
+            neth.iecal.curbox.data.sync.SyncGateway.provider.remoteAppUsage(date.toString())
+        }.getOrDefault(emptyMap())
+        val appStats = if (remoteApps.isEmpty()) stats else mergeRemoteApps(stats, remoteApps)
+
+        preloadAppMetadata(appStats.map { it.packageName })
+        val total = appStats.sumOf { it.totalTime }
         val today = LocalDate.now()
         val isToday = date == today
 
@@ -217,7 +226,7 @@ class AllAppsUsageViewModel(application: Application) : AndroidViewModel(applica
             neth.iecal.curbox.data.sync.SyncGateway.provider.remoteWebsiteUsage(date.toString())
         }.getOrDefault(emptyMap())
 
-        var statsOut = stats
+        var statsOut = appStats.sortedByDescending { it.totalTime }
         var websiteOut = websiteStats
         if (remote.isNotEmpty()) {
             val syncedWebsites = remote.map { (domain, ms) ->
@@ -231,7 +240,7 @@ class AllAppsUsageViewModel(application: Application) : AndroidViewModel(applica
                 )
             }
             websiteOut = websiteStats + syncedWebsites
-            statsOut = (stats + AllAppsUsageFragment.Stat(
+            statsOut = (appStats + AllAppsUsageFragment.Stat(
                 neth.iecal.curbox.data.sync.SYNCED_WEB_PACKAGE,
                 remote.values.sum(),
             )).sortedByDescending { it.totalTime }
@@ -243,6 +252,33 @@ class AllAppsUsageViewModel(application: Application) : AndroidViewModel(applica
             _totalTime.value = total
             _dateSublabel.value = sublabel
         }
+    }
+
+    // Combines other devices' per app time into this device's list: matching apps
+    // get their time added together, and apps that only ran on another device are
+    // appended as their own rows.
+    private fun mergeRemoteApps(
+        local: List<AllAppsUsageFragment.Stat>,
+        remote: Map<String, Long>,
+    ): List<AllAppsUsageFragment.Stat> {
+        val localByPkg = local.associateBy { it.packageName }
+        val merged = ArrayList<AllAppsUsageFragment.Stat>(local.size + remote.size)
+        for (st in local) {
+            val extra = remote[st.packageName] ?: 0L
+            merged.add(
+                if (extra > 0L) {
+                    AllAppsUsageFragment.Stat(st.packageName, st.totalTime + extra, st.sessions, st.hourlyUsage)
+                } else {
+                    st
+                },
+            )
+        }
+        for ((pkg, ms) in remote) {
+            if (pkg !in localByPkg && ms >= 1_000 && pkg !in ignoredPackages) {
+                merged.add(AllAppsUsageFragment.Stat(pkg, ms))
+            }
+        }
+        return merged
     }
 
     private fun getWeekStart(offset: Int): LocalDate {

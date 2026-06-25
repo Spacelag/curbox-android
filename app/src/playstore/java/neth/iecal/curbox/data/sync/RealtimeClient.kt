@@ -23,6 +23,7 @@ class RealtimeClient(
     private val userId: String,
     @Volatile private var accessToken: String,
     private val onChange: () -> Unit,
+    private val onConnected: (Boolean) -> Unit = {},
     private val anonKey: String = SupabaseRest.ANON_KEY,
     private val baseWss: String = "wss://pdixkzhncuuxuxwhdwdh.supabase.co/realtime/v1/websocket",
 ) {
@@ -30,6 +31,7 @@ class RealtimeClient(
     @Volatile private var ws: WebSocket? = null
     private val topic = "realtime:curbox:$userId"
     private val running = AtomicBoolean(false)
+    private val reconnecting = AtomicBoolean(false)
     private var ref = 0
 
     fun start() {
@@ -39,6 +41,7 @@ class RealtimeClient(
 
     fun stop() {
         running.set(false)
+        onConnected(false)
         runCatching { ws?.close(1000, null) }
         ws = null
     }
@@ -66,6 +69,7 @@ class RealtimeClient(
             req,
             object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
+                    onConnected(true)
                     join(webSocket)
                     startHeartbeat(webSocket)
                 }
@@ -76,10 +80,12 @@ class RealtimeClient(
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                    onConnected(false)
                     reconnectLater()
                 }
 
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                    onConnected(false)
                     reconnectLater()
                 }
             },
@@ -129,12 +135,17 @@ class RealtimeClient(
 
     private fun reconnectLater() {
         if (!running.get()) return
+        // onFailure and onClosed can both fire for the same socket; this guard
+        // makes sure only one reconnect (and one new socket + heartbeat) is ever
+        // scheduled at a time, so they cannot pile up on a flaky network.
+        if (!reconnecting.compareAndSet(false, true)) return
         ws = null
         Thread {
             try {
                 Thread.sleep(3000)
             } catch (_: InterruptedException) {
             }
+            reconnecting.set(false)
             if (running.get()) connect()
         }.apply { isDaemon = true }.start()
     }

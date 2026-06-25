@@ -30,6 +30,9 @@ interface SyncProvider {
 
     /** Website usage synced from other devices (e.g. the browser extension), domain to milliseconds, for an ISO date. */
     suspend fun remoteWebsiteUsage(dateIso: String): Map<String, Long>
+
+    /** App usage synced from a user's other Android devices, package name to milliseconds, for an ISO date. */
+    suspend fun remoteAppUsage(dateIso: String): Map<String, Long>
 }
 
 /** Sentinel package used for the synthetic "Synced browsing" row in the usage list. */
@@ -68,6 +71,7 @@ object NoopSyncProvider : SyncProvider {
     override suspend fun refresh() {}
     override suspend fun pushNow() {}
     override suspend fun remoteWebsiteUsage(dateIso: String): Map<String, Long> = emptyMap()
+    override suspend fun remoteAppUsage(dateIso: String): Map<String, Long> = emptyMap()
 
     private fun unsupported(): Nothing = throw UnsupportedOperationException("Sync is not available in this build")
 }

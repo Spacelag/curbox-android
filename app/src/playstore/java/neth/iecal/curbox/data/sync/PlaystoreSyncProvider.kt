@@ -61,6 +61,7 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
     // yet, so the UI must offer to UNLOCK or pair, not create a new passphrase.
     private var vaultExists: Boolean = false
     private var realtime: RealtimeClient? = null
+    @Volatile private var realtimeConnected = false
     private var pollStarted = false
     private var lastConfigJson: String? = null
     private var lastFocusJson: String? = null
@@ -230,6 +231,10 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
         RemoteUsageStore(context).websiteTotals(dateIso)
     }
 
+    override suspend fun remoteAppUsage(dateIso: String): Map<String, Long> = withContext(Dispatchers.IO) {
+        RemoteUsageStore(context).appTotals(dateIso)
+    }
+
     override suspend fun pushNow() = withContext(Dispatchers.IO) {
         pushConfig()
         pushUsage()
@@ -296,12 +301,14 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
             userId = s.userId,
             accessToken = s.accessToken,
             onChange = { scope.launch { pullSinceCursor() } },
+            onConnected = { realtimeConnected = it },
         ).also { runCatching { it.start() } }
     }
 
     private fun stopRealtime() {
         runCatching { realtime?.stop() }
         realtime = null
+        realtimeConnected = false
     }
 
     // A short backstop poll so sync stays quick even if the realtime socket is
@@ -313,7 +320,9 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
         pollStarted = true
         scope.launch {
             while (true) {
-                delay(10_000)
+                // When realtime is delivering, this is just a slow backstop; when
+                // it is down (e.g. WebSockets blocked) it tightens up to stay quick.
+                delay(if (realtimeConnected) 60_000 else 10_000)
                 if (dek == null || session == null) continue
                 ensureFreshToken()
                 runCatching { pullSinceCursor() }
@@ -426,47 +435,52 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
         runCatching { pushAppRows(iso, db.appUsageDao().getForDate(native)) }
     }
 
+    // One record carries a whole day's web usage for this device, keyed by
+    // deviceId:date, so a busy day is a single row instead of one per domain.
     private fun pushWebRows(date: String, rows: List<WebsiteStatsEntity>) {
         val s = session ?: return
         val d = dek ?: return
-        val byDomain = rows.groupBy { it.domain }
-        for ((domain, group) in byDomain) {
-            val ms = group.sumOf { it.totalTime }
+        val domains = JsonObject()
+        for ((domain, group) in rows.groupBy { it.domain }) {
             val paths = JsonObject().apply { group.forEach { addProperty(it.urlIdentifier, it.totalTime) } }
-            val payload = JsonObject().apply {
-                addProperty("date", date)
-                addProperty("domain", domain)
-                addProperty("ms", ms)
+            domains.add(domain, JsonObject().apply {
+                addProperty("ms", group.sumOf { it.totalTime })
                 add("paths", paths)
-                addProperty("platform", "android")
-            }
-            val recordKey = "${keys.deviceId}:$date:$domain"
-            if (pushedHashes[recordKey] == payload.hashCode()) continue
-            val aad = CryptoBox.recordAad(s.userId, NS_USAGE_WEB, recordKey)
-            val blob = CryptoBox.encryptRecord(d, aad, payload.toString())
-            rest.upsertRecord(s, NS_USAGE_WEB, recordKey, keys.deviceId, CryptoBox.toBase64Url(blob), System.currentTimeMillis())
-            pushedHashes[recordKey] = payload.hashCode()
+            })
         }
+        val payload = JsonObject().apply {
+            addProperty("date", date)
+            addProperty("platform", "android")
+            add("domains", domains)
+        }
+        pushUsageRecord(s, d, NS_USAGE_WEB, "${keys.deviceId}:$date", payload)
     }
 
     private fun pushAppRows(date: String, rows: List<AppUsageEntity>) {
         val s = session ?: return
         val d = dek ?: return
+        val apps = JsonObject()
         for (row in rows) {
-            val payload = JsonObject().apply {
-                addProperty("date", date)
-                addProperty("package", row.packageName)
+            apps.add(row.packageName, JsonObject().apply {
                 addProperty("ms", row.totalTime)
                 addProperty("launchCount", row.launchCount)
                 addProperty("hourlyUsage", row.hourlyUsage)
-            }
-            val recordKey = "${keys.deviceId}:$date:${row.packageName}"
-            if (pushedHashes[recordKey] == payload.hashCode()) continue
-            val aad = CryptoBox.recordAad(s.userId, NS_USAGE_APP, recordKey)
-            val blob = CryptoBox.encryptRecord(d, aad, payload.toString())
-            rest.upsertRecord(s, NS_USAGE_APP, recordKey, keys.deviceId, CryptoBox.toBase64Url(blob), System.currentTimeMillis())
-            pushedHashes[recordKey] = payload.hashCode()
+            })
         }
+        val payload = JsonObject().apply {
+            addProperty("date", date)
+            add("apps", apps)
+        }
+        pushUsageRecord(s, d, NS_USAGE_APP, "${keys.deviceId}:$date", payload)
+    }
+
+    private fun pushUsageRecord(s: SupabaseRest.Session, d: ByteArray, namespace: String, recordKey: String, payload: JsonObject) {
+        val hashKey = "$namespace/$recordKey"
+        if (pushedHashes[hashKey] == payload.hashCode()) return
+        val aad = CryptoBox.recordAad(s.userId, namespace, recordKey)
+        val blob = CryptoBox.encryptRecord(d, aad, payload.toString())
+        rest.upsertRecord(s, namespace, recordKey, keys.deviceId, CryptoBox.toBase64Url(blob), System.currentTimeMillis())
+        pushedHashes[hashKey] = payload.hashCode()
     }
 
     // Focus mode (cross platform) -----------------------------------------
@@ -655,10 +669,15 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
         val d = dek ?: return
         try {
             val rows = rest.pull(s, keys.cursor)
+            // Idle poll: nothing new. Skip the work and, importantly, do not
+            // republish status, so the UI does not re-render every poll tick.
+            if (rows.isEmpty()) return
             var configRow: SupabaseRest.SyncRow? = null
             var focusRow: SupabaseRest.SyncRow? = null
             val focusGroupRows = ArrayList<SupabaseRest.SyncRow>()
-            val remoteUsage = RemoteUsageStore(context)
+            // Loaded lazily: most pulls carry no usage rows, so we avoid reading
+            // and parsing the whole remote usage file on every tick.
+            var remoteUsage: RemoteUsageStore? = null
             // Track the high water mark separately and only commit it once the
             // whole batch is applied. A single undecryptable row is skipped rather
             // than poisoning the batch, but the cursor never jumps past work we
@@ -671,15 +690,15 @@ class PlaystoreSyncProvider(private val context: Context) : SyncProvider {
                         row.namespace == NS_FOCUS && row.deviceId != keys.deviceId -> focusRow = row
                         row.namespace == NS_FOCUS_GROUPS && row.deviceId != keys.deviceId -> focusGroupRows.add(row)
                         row.namespace == NS_USAGE_WEB && row.deviceId != keys.deviceId ->
-                            applyUsageRow(d, s, row, remoteUsage, web = true)
+                            applyUsageRow(d, s, row, remoteUsage ?: RemoteUsageStore(context).also { remoteUsage = it }, web = true)
                         row.namespace == NS_USAGE_APP && row.deviceId != keys.deviceId ->
-                            applyUsageRow(d, s, row, remoteUsage, web = false)
+                            applyUsageRow(d, s, row, remoteUsage ?: RemoteUsageStore(context).also { remoteUsage = it }, web = false)
                         else -> {}
                     }
                 }
                 if (row.updatedAt > maxCursor) maxCursor = row.updatedAt
             }
-            remoteUsage.flush()
+            remoteUsage?.flush()
             if (focusGroupRows.isNotEmpty()) runCatching { applyFocusGroupRows(d, s, focusGroupRows) }
             configRow?.let { runCatching { applyConfigRow(d, s, it) } }
             focusRow?.let { runCatching { applyFocusRow(d, s, it) } }
