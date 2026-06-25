@@ -11,13 +11,23 @@ import android.view.ViewGroup
 import android.widget.Toast
 import androidx.fragment.app.Fragment
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import java.io.File
+import neth.iecal.curbox.BuildConfig
 import neth.iecal.curbox.databinding.FragmentInfoBinding
+import neth.iecal.curbox.ui.fragments.main.reducers.sync.AccountController
 
 class InfoFragment : Fragment() {
 
     private var _binding: FragmentInfoBinding? = null
     private val binding get() = _binding!!
+
+    private var accountController: AccountController? = null
+
+    private val scanLauncher = registerForActivityResult(ScanContract()) { result ->
+        result.contents?.let { accountController?.pairWith(it) }
+    }
 
     override fun onCreateView(
         inflater: LayoutInflater, container: ViewGroup?,
@@ -29,8 +39,20 @@ class InfoFragment : Fragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
-        
+
+        setupAccountSection()
         setupClickListeners()
+    }
+
+    // Account and sync live here in the Play Store build only. F-Droid stays
+    // offline, so the section never appears and there is no login to be seen.
+    private fun setupAccountSection() {
+        if (BuildConfig.FDROID_VARIANT) return
+
+        binding.cardAccount.visibility = View.VISIBLE
+        accountController = AccountController(binding.cardAccount, this) {
+            scanLauncher.launch(ScanOptions().setOrientationLocked(true).setPrompt("Point at the pairing code"))
+        }.also { it.bind() }
     }
 
     private fun setupClickListeners() {
@@ -130,6 +152,7 @@ class InfoFragment : Fragment() {
 
     override fun onDestroyView() {
         super.onDestroyView()
+        accountController = null
         _binding = null
     }
 }

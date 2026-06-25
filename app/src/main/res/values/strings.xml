@@ -253,6 +253,7 @@
     <string name="focus">Focus</string>
     <string name="reducers">Reducers</string>
     <string name="info">Info</string>
+    <string name="settings">Settings</string>
     <string name="this_app_is_currently_under_focus">This app is currently under focus mode</string>
     <string name="blocked_keyword_word_was_found">Blocked keyword -word was found.</string>
     <string name="please_provide_draw_over_other_apps">Please provide \'Draw over other apps\' permission to make this service work properly. </string>

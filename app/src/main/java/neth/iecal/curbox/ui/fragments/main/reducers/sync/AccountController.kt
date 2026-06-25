@@ -111,6 +111,9 @@ class AccountController(
                 qr.visibility = View.VISIBLE
             }
         }
+        root.findViewById<View>(R.id.btn_force_sync).setOnClickListener {
+            submit("Syncing your latest data now") { provider.pushNow(); provider.refresh() }
+        }
         root.findViewById<View>(R.id.btn_signout).setOnClickListener { submit { provider.signOut() } }
 
         fragment.viewLifecycleOwner.lifecycleScope.launch {

@@ -16,8 +16,6 @@ import neth.iecal.curbox.ui.fragments.installation.onboarding.screens.ScreenTime
 import neth.iecal.curbox.ui.fragments.installation.onboarding.screens.CoreValuesFragment
 import neth.iecal.curbox.ui.fragments.installation.onboarding.screens.TargetSelectionFragment
 import neth.iecal.curbox.ui.fragments.installation.onboarding.screens.OnboardingPermissionsFragment
-import neth.iecal.curbox.ui.fragments.installation.onboarding.screens.AccountOnboardingFragment
-import neth.iecal.curbox.BuildConfig
 
 class OnboardingFragment : Fragment() {
 
@@ -137,11 +135,9 @@ class OnboardingFragment : Fragment() {
     }
 
     private inner class OnboardingPagerAdapter(fragment: Fragment) : FragmentStateAdapter(fragment) {
-        // The account step only exists in the Play Store build. F-Droid skips it
-        // entirely so onboarding never shows a login there.
-        private val showAccount = !BuildConfig.FDROID_VARIANT
-
-        override fun getItemCount(): Int = if (showAccount) 6 else 5
+        // Onboarding never asks for a login. Sync lives in Settings (Play Store
+        // only) and stays out of the way until someone goes looking for it.
+        override fun getItemCount(): Int = 5
 
         override fun createFragment(position: Int): Fragment {
             return when (position) {
@@ -149,8 +145,7 @@ class OnboardingFragment : Fragment() {
                 1 -> ScreenTimeEstimateFragment()
                 2 -> CoreValuesFragment()
                 3 -> TargetSelectionFragment()
-                4 -> if (showAccount) AccountOnboardingFragment() else OnboardingPermissionsFragment()
-                5 -> OnboardingPermissionsFragment()
+                4 -> OnboardingPermissionsFragment()
                 else -> throw IllegalArgumentException("Invalid position $position")
             }
         }

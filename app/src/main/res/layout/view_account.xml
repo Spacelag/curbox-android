@@ -361,6 +361,14 @@
             android:text="Anyone who sees this code can read your data, so only show it to your own devices." />
 
         <com.google.android.material.button.MaterialButton
+            android:id="@+id/btn_force_sync"
+            style="@style/Widget.Material3.Button.TonalButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="Sync now" />
+
+        <com.google.android.material.button.MaterialButton
             android:id="@+id/btn_signout"
             style="@style/Widget.Material3.Button.TextButton"
             android:layout_width="match_parent"

@@ -110,19 +110,6 @@ class ReducersFragment : Fragment() {
             startActivity(intent)
         }
 
-        // Sync exists only in the Play Store build. F-Droid stays offline, so the
-        // card never appears there and there is no login to be seen.
-        val syncCard = view.findViewById<MaterialCardView>(R.id.card_sync)
-        if (!neth.iecal.curbox.BuildConfig.FDROID_VARIANT) {
-            syncCard.visibility = View.VISIBLE
-            syncCard.setOnClickListener {
-                val intent = Intent(requireContext(), FragmentActivity::class.java).apply {
-                    putExtra("fragment", neth.iecal.curbox.ui.fragments.main.reducers.sync.SyncFragment.FRAGMENT_ID)
-                }
-                startActivity(intent)
-            }
-        }
-
         val advancedHeader = view.findViewById<View>(R.id.advanced_header)
         val advancedContent = view.findViewById<View>(R.id.advanced_content)
         val advancedArrow = view.findViewById<ImageView>(R.id.advanced_arrow)
