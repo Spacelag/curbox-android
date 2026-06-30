@@ -30,7 +30,10 @@ val URL_BAR_ID_LIST = mapOf(
     "org.ironfoxoss.ironfox" to BrowserUrlBarInfo(
         displayUrlBarId = "ADDRESSBAR_URL_BOX",
     ),
-
+    "io.github.forkmaintainers.iceraven" to BrowserUrlBarInfo(
+        displayUrlBarId = "ADDRESSBAR_URL_BOX",
+    ),
+    
 
     "com.opera.browser" to BrowserUrlBarInfo(
         displayUrlBarId = "com.opera.browser:id/url_field",
